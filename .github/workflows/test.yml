@@ -1,40 +1,56 @@
 # .github/workflows/test.yml
 name: Tests
 
-on:
-  push:
-    branches: [ main, develop, feature/* ]
-  pull_request:
-    branches: [ main, develop ]
-  workflow_dispatch:  # Manual trigger
-
-env:
-  PYTHON_VERSION: '3.9'
-  TEST_TIMEOUT: 300  # 5 minutes timeout
+on: [push, pull_request]
 
 jobs:
   test:
-    name: Run Tests
     runs-on: ubuntu-latest
     
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
       with:
-        fetch-depth: 0  # Fetch all history for proper versioning
-        
-    - name: Set up Python ${{ env.PYTHON_VERSION }}
-      uses: actions/setup-python@v5
-      with:
-        python-version: ${{ env.PYTHON_VERSION }}
-        cache: 'pip'  # Enable caching for pip
-        
+        python-version: '3.9'
+    
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y tesseract-ocr tesseract-ocr-eng libgl1-mesa-glx
-        
+        sudo apt-get install -y tesseract-ocr tesseract-ocr-eng
+    
     - name: Install Python dependencies
+      run: |
+        pip install -r requirements.txt
+        pip install pytest pytest-cov pytest-html
+    
+    - name: Run test script
+      run: |
+        if [ -f "test_all.py" ]; then
+          python test_all.py
+        elif [ -f "tests/test_all.py" ]; then
+          python tests/test_all.py
+        else
+          echo "Running pytest directly..."
+          python -m pytest tests/ -v
+        fi
+    
+    - name: Run pytest with coverage
+      run: |
+        python -m pytest tests/ --cov=src --cov-report=xml --cov-report=html
+    
+    - name: Upload coverage
+      uses: codecov/codecov-action@v4
+      
+    - name: Upload test artifacts
+      uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: test-reports
+        path: |
+          htmlcov/
+          coverage.xml    - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
         pip install -r requirements.txt
