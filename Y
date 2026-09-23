@@ -1,0 +1,851 @@
+// ==UserScript==
+// @name         OF All-in-One
+// @namespace    https://onlyfaucet.com/
+// @version      1.1
+// @description  Auto-login + faucet + shortlinks with checkboxes and start/stop + auto Claim Now
+// @author       mrtznx
+// @run-at       document-end
+// @match        https://onlyfaucet.com/*
+// @match        https://*.onlyfaucet.com/*
+// @grant        none
+// ==/UserScript==
+
+(function () {
+    'use strict';
+
+    var CFG = {
+        // ===== LOGIN =====
+        autoLogin:        true,
+        loginEmail:       'kaam7525@gmail.com',    // <-- PUT YOUR EMAIL HERE
+
+        // ===== FAUCET =====
+        autoOpenGate:     true,
+        autoSolve:        true,
+        autoSubmit:       true,
+        autoReturn:       true,
+        returnDelayMs:    3500,
+        dilateRadius:     3,
+        humanLike:        true,
+        clickDelayMin:    800,
+        clickDelayMax:    2200,
+        submitDelayMin:   1800,
+        submitDelayMax:   3500,
+
+        // ===== CLAIM NOW BUTTON =====
+        autoClaimNow:     true,
+        claimNowMinMs:    2000,
+        claimNowMaxMs:    5000,
+
+        // ===== SHORTLINKS =====
+        betweenMs:        3000,
+        autoVerifyModal:  true,
+        showCheckboxes:   true,
+
+        // ===== COMMON =====
+        killOverlays:     true,
+        showBadge:        true,
+        showPreview:      true,
+        debug:            true
+    };
+
+    // ==================== HELPERS ====================
+    function randRange(a, b) { return a + Math.random() * (b - a); }
+    function randInt(a, b) { return Math.floor(randRange(a, b + 1)); }
+    function gaussian(m, s) {
+        var u = 1 - Math.random(), v = Math.random();
+        return m + s * Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v);
+    }
+
+    var dbgBox = null, dbgLines = [];
+    function dbg(msg) {
+        if (CFG.debug) try { console.log('[OF]', msg); } catch (e) {}
+        dbgLines.unshift(msg);
+        if (dbgLines.length > 20) dbgLines.pop();
+        if (!CFG.showBadge || !document.body) return;
+        if (!dbgBox) {
+            dbgBox = document.createElement('div');
+            dbgBox.id = 'of-dbg';
+            dbgBox.style.cssText = 'position:fixed;top:4px;left:4px;right:4px;z-index:2147483647;background:#000;color:#0f0;font:10px monospace;padding:5px;border:1px solid #0f0;border-radius:6px;max-height:40%;overflow:auto;white-space:pre-wrap;word-break:break-all';
+            document.body.appendChild(dbgBox);
+        }
+        dbgBox.textContent = dbgLines.join('\n');
+    }
+
+    // ==================== OVERLAY KILLER ====================
+    var OVERLAY_SEL = [
+        'div[data-cc-id][data-format="3"]',
+        'div[style*="z-index: 2147483647"]',
+        'div[style*="z-index: 999999"]',
+        '[id*="ads-"][id*="-top-scroll"]',
+        '.clever-core-ads',
+        'iframe[src*="adsboosters"]',
+        'iframe[src*="ctengine"]',
+        'iframe[src*="cleverwebserver"]',
+        '[class*="ct_"][class*="_wrapper"]',
+        '[class*="ct_"][class*="_container"]'
+    ].join(',');
+
+    function killOverlays(root) {
+        if (!CFG.killOverlays) return;
+        try {
+            (root || document).querySelectorAll(OVERLAY_SEL).forEach(function (el) {
+                if (el.id === 'of-dbg' || el.id === 'of-preview-canvas' || el.id === 'of-panel') return;
+                if (el.querySelector && el.querySelector('#of-dbg, #of-preview-canvas, #of-panel')) return;
+                el.remove();
+            });
+        } catch (e) {}
+    }
+    try {
+        new MutationObserver(function (muts) {
+            for (var i = 0; i < muts.length; i++) {
+                for (var j = 0; j < muts[i].addedNodes.length; j++) {
+                    var n = muts[i].addedNodes[j];
+                    if (n.nodeType !== 1) continue;
+                    try {
+                        if (n.matches && n.matches(OVERLAY_SEL)) { n.remove(); continue; }
+                        if (n.querySelectorAll) killOverlays(n);
+                    } catch (e) {}
+                }
+            }
+        }).observe(document.documentElement, { childList: true, subtree: true });
+    } catch (e) {}
+
+    // ==================== LOGIN ====================
+    var loginDone = false;
+
+    function tryAutoLogin() {
+        if (!CFG.autoLogin || loginDone) return false;
+        var wallet = document.getElementById('walletInput');
+        var btn = document.getElementById('loginBtn');
+        if (!wallet || !btn) return false;
+        if (wallet.value && wallet.value.length > 5) { loginDone = true; return false; }
+        if (!CFG.loginEmail || CFG.loginEmail.indexOf('@') === -1) {
+            dbg('[login] email not set');
+            loginDone = true;
+            return false;
+        }
+        wallet.value = CFG.loginEmail;
+        wallet.dispatchEvent(new Event('input', { bubbles: true }));
+        wallet.dispatchEvent(new Event('change', { bubbles: true }));
+        dbg('[login] email filled');
+        var delay = CFG.humanLike ? randInt(1200, 2500) : 800;
+        setTimeout(function () {
+            try { btn.click(); dbg('[login] clicked'); loginDone = true; }
+            catch (e) { dbg('[login] err ' + e.message); }
+        }, delay);
+        return true;
+    }
+
+    // ==================== CLAIM NOW BUTTON ====================
+    var claimNowDone = {};
+
+    function findClaimNowButton() {
+        // Prioritas 1: cari span dengan id tx_* yang teksnya "Claim Now"
+        var spans = document.querySelectorAll('span[id^="tx_"]');
+        for (var i = 0; i < spans.length; i++) {
+            var txt = (spans[i].textContent || '').trim();
+            if (/^claim now$/i.test(txt)) {
+                // Naikkan ke parent yang clickable kalau ada
+                var p = spans[i].closest('button, a, [role="button"]');
+                return p || spans[i];
+            }
+        }
+        // Fallback: cari semua element clickable bertekstur "Claim Now"
+        var all = document.querySelectorAll('button, a, [role="button"], span');
+        for (var j = 0; j < all.length; j++) {
+            var t = (all[j].textContent || '').trim();
+            if (/^claim now$/i.test(t)) {
+                var el = all[j];
+                if (el.tagName === 'BUTTON' || el.tagName === 'A') return el;
+                var pc = el.closest('button, a, [role="button"]');
+                return pc || el;
+            }
+        }
+        return null;
+    }
+
+    function autoClickClaimNow() {
+        if (!CFG.autoClaimNow) return;
+        var btn = findClaimNowButton();
+        if (!btn) return;
+
+        var key = btn.id || (btn.textContent || '').trim();
+        if (claimNowDone[key]) return;
+
+        // Cek visibility
+        try {
+            var st = getComputedStyle(btn);
+            if (st.display === 'none' || st.visibility === 'hidden') return;
+            if (parseFloat(st.opacity) === 0) return;
+            var rect = btn.getBoundingClientRect();
+            if (rect.width === 0 || rect.height === 0) return;
+        } catch (e) { return; }
+
+        claimNowDone[key] = true;
+        var delay = CFG.humanLike
+            ? randInt(CFG.claimNowMinMs, CFG.claimNowMaxMs)
+            : 1500;
+
+        dbg('[claimNow] found, clicking in ' + delay + 'ms');
+
+        setTimeout(function () {
+            try {
+                btn.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                setTimeout(function () {
+                    var evOpts = { bubbles: true, cancelable: true, view: window };
+                    try { btn.dispatchEvent(new MouseEvent('mousedown', evOpts)); } catch (e) {}
+                    try { btn.dispatchEvent(new MouseEvent('mouseup', evOpts)); } catch (e) {}
+                    try { btn.dispatchEvent(new MouseEvent('click', evOpts)); } catch (e) {}
+                    if (typeof btn.click === 'function') {
+                        try { btn.click(); } catch (e) {}
+                    }
+                    dbg('[claimNow] clicked');
+                }, CFG.humanLike ? randInt(300, 900) : 200);
+            } catch (e) {
+                dbg('[claimNow] err ' + e.message);
+            }
+        }, delay);
+    }
+
+    function startClaimNowWatcher() {
+        if (!CFG.autoClaimNow) return;
+        // Cek awal
+        setTimeout(autoClickClaimNow, 1500);
+        // Polling
+        setInterval(autoClickClaimNow, 1200);
+        // MutationObserver — responsif saat tombol muncul dinamis
+        try {
+            new MutationObserver(function () {
+                autoClickClaimNow();
+            }).observe(document.documentElement, {
+                childList: true,
+                subtree: true,
+                characterData: true
+            });
+        } catch (e) {}
+    }
+
+    // ==================== FAUCET ====================
+    var CW = 450, CH = 280, solvedAnswer = null;
+
+    function startFaucet() {
+        var origFetch = window.fetch;
+        window.fetch = function (input, init) {
+            var url = typeof input === 'string' ? input : (input && input.url);
+            var p = origFetch.apply(this, arguments);
+            if (url && String(url).indexOf('/faucet/captcha_image') !== -1) {
+                dbg('[fetch] captcha');
+                p.then(function (resp) {
+                    var instr = null;
+                    try { instr = resp.headers.get('X-Captcha-Instruction'); } catch (e) {}
+                    resp.clone().blob().then(function (blob) {
+                        var w = CFG.humanLike ? randInt(200, 600) : 0;
+                        setTimeout(function () { solveCaptcha(blob, instr); }, w);
+                    });
+                }).catch(function (e) { dbg('[fetch] err ' + e.message); });
+            }
+            return p;
+        };
+
+        var origOpen = XMLHttpRequest.prototype.open;
+        XMLHttpRequest.prototype.open = function (m, u) {
+            this._ofUrl = u;
+            return origOpen.apply(this, arguments);
+        };
+        var origSend = XMLHttpRequest.prototype.send;
+        XMLHttpRequest.prototype.send = function (b) {
+            var self = this;
+            if (self._ofUrl && String(self._ofUrl).indexOf('/faucet/captcha_image') !== -1) {
+                self.addEventListener('load', function () {
+                    try {
+                        var instr = self.getResponseHeader('X-Captcha-Instruction');
+                        if (self.response instanceof Blob) {
+                            var w = CFG.humanLike ? randInt(200, 600) : 0;
+                            setTimeout(function () { solveCaptcha(self.response, instr); }, w);
+                        }
+                    } catch (e) {}
+                });
+            }
+            return origSend.apply(this, arguments);
+        };
+
+        watchFaucetSuccess();
+        startFaucetAutoClick();
+        turnstileWatchdog();
+    }
+
+    function detectInstruction(instr) {
+        if (instr === 'DESC' || instr === 'ASC') return instr;
+        try {
+            var el = document.querySelector('[id^="mcins_"]');
+            if (el) {
+                var t = el.textContent || '';
+                if (t.indexOf('LARGEST to') !== -1) return 'DESC';
+                if (t.indexOf('SMALLEST to') !== -1) return 'ASC';
+            }
+        } catch (e) {}
+        return 'DESC';
+    }
+
+    function dilateMask(mask, W, H, r) {
+        var out = new Uint8Array(W * H);
+        for (var y = 0; y < H; y++) {
+            for (var x = 0; x < W; x++) {
+                var v = 0;
+                for (var dy = -r; dy <= r && !v; dy++) {
+                    var yy = y + dy;
+                    if (yy < 0 || yy >= H) continue;
+                    for (var dx = -r; dx <= r; dx++) {
+                        var xx = x + dx;
+                        if (xx < 0 || xx >= W) continue;
+                        if (mask[yy * W + xx]) { v = 1; break; }
+                    }
+                }
+                out[y * W + x] = v;
+            }
+        }
+        return out;
+    }
+
+    function erodeMask(mask, W, H, r) {
+        var out = new Uint8Array(W * H);
+        for (var y = 0; y < H; y++) {
+            for (var x = 0; x < W; x++) {
+                var v = 1;
+                for (var dy = -r; dy <= r; dy++) {
+                    if (!v) break;
+                    var yy = y + dy;
+                    if (yy < 0 || yy >= H) { v = 0; break; }
+                    for (var dx = -r; dx <= r; dx++) {
+                        var xx = x + dx;
+                        if (xx < 0 || xx >= W) { v = 0; break; }
+                        if (!mask[yy * W + xx]) { v = 0; break; }
+                    }
+                }
+                out[y * W + x] = v;
+            }
+        }
+        return out;
+    }
+
+    function solveCaptcha(blob, instruction) {
+        if (!CFG.autoSolve) return;
+        dbg('[solve] analyzing');
+
+        var bmpP;
+        if (typeof createImageBitmap === 'function') bmpP = createImageBitmap(blob);
+        else {
+            bmpP = new Promise(function (res, rej) {
+                var img = new Image();
+                img.onload = function () { res(img); };
+                img.onerror = rej;
+                img.src = URL.createObjectURL(blob);
+            });
+        }
+
+        bmpP.then(function (img) {
+            var cv = document.createElement('canvas');
+            cv.width = CW; cv.height = CH;
+            var ctx = cv.getContext('2d');
+            ctx.drawImage(img, 0, 0, CW, CH);
+            var data = ctx.getImageData(0, 0, CW, CH).data;
+            var W = CW, H = CH;
+
+            var hist = {};
+            for (var i = 0; i < data.length; i += 8) {
+                var k = (data[i] >> 5) + ',' + (data[i + 1] >> 5) + ',' + (data[i + 2] >> 5);
+                hist[k] = (hist[k] || 0) + 1;
+            }
+            var bgKey = '', bgCount = 0;
+            for (var kk in hist) if (hist[kk] > bgCount) { bgCount = hist[kk]; bgKey = kk; }
+            var bp = bgKey.split(',');
+            var br = (+bp[0]) * 32 + 16, bg = (+bp[1]) * 32 + 16, bb = (+bp[2]) * 32 + 16;
+
+            var mask = new Uint8Array(W * H);
+            for (var p = 0; p < W * H; p++) {
+                var o = p * 4;
+                var dr = Math.abs(data[o] - br);
+                var dg = Math.abs(data[o + 1] - bg);
+                var db2 = Math.abs(data[o + 2] - bb);
+                if (dr + dg + db2 > 90) mask[p] = 1;
+            }
+
+            var dR = CFG.dilateRadius || 3;
+            var dilated = dilateMask(mask, W, H, dR);
+            mask = erodeMask(dilated, W, H, dR);
+
+            var visited = new Uint8Array(W * H);
+            var comps = [];
+            for (var y = 0; y < H; y++) {
+                for (var x = 0; x < W; x++) {
+                    var idx = y * W + x;
+                    if (!mask[idx] || visited[idx]) continue;
+                    var stack = [idx];
+                    var n = 0, sx = 0, sy = 0;
+                    var minX = x, maxX = x, minY = y, maxY = y;
+                    while (stack.length) {
+                        var ii = stack.pop();
+                        if (visited[ii]) continue;
+                        visited[ii] = 1;
+                        var cy = (ii / W) | 0;
+                        var cx = ii % W;
+                        n++; sx += cx; sy += cy;
+                        if (cx < minX) minX = cx;
+                        if (cx > maxX) maxX = cx;
+                        if (cy < minY) minY = cy;
+                        if (cy > maxY) maxY = cy;
+                        if (cx > 0 && mask[ii - 1] && !visited[ii - 1]) stack.push(ii - 1);
+                        if (cx < W - 1 && mask[ii + 1] && !visited[ii + 1]) stack.push(ii + 1);
+                        if (cy > 0 && mask[ii - W] && !visited[ii - W]) stack.push(ii - W);
+                        if (cy < H - 1 && mask[ii + W] && !visited[ii + W]) stack.push(ii + W);
+                    }
+                    var ww = maxX - minX + 1;
+                    var hh = maxY - minY + 1;
+                    if (n >= 1500 && ww >= 50 && hh >= 50 && ww < W * 0.85 && hh < H * 0.85) {
+                        comps.push({ cx: sx / n, cy: sy / n, n: n, w: ww, h: hh, minX: minX, minY: minY, maxX: maxX, maxY: maxY });
+                    }
+                }
+            }
+            if (comps.length < 2) { dbg('[solve] too few'); return; }
+
+            comps.sort(function (a, b) { return b.n - a.n; });
+            var maxN = comps[0].n;
+            var kept = comps.filter(function (c) { return c.n >= maxN * 0.15; });
+            if (kept.length > 3) kept = kept.slice(0, 3);
+            var desc = (detectInstruction(instruction) === 'DESC');
+            kept.sort(function (a, b) { return desc ? b.n - a.n : a.n - b.n; });
+
+            var path = buildHumanPath(kept);
+            solvedAnswer = path.map(function (pt) { return pt.x + ',' + pt.y; }).join(';');
+            dbg('[solve] pts=' + path.length);
+
+            if (CFG.showPreview) drawPreview(ctx, path, kept);
+            waitFaucetSubmit();
+        }).catch(function (e) { dbg('[solve] err ' + e.message); });
+    }
+
+    function buildHumanPath(shapes) {
+        var path = [];
+        function addPt(x, y, j) {
+            if (j && CFG.humanLike) { x += gaussian(0, 1.2); y += gaussian(0, 1.2); }
+            x = Math.round(x); y = Math.round(y);
+            if (x < 0) x = 0; if (x > CW - 1) x = CW - 1;
+            if (y < 0) y = 0; if (y > CH - 1) y = CH - 1;
+            var L = path[path.length - 1];
+            if (L && L.x === x && L.y === y) return;
+            if (L && Math.sqrt((x - L.x) * (x - L.x) + (y - L.y) * (y - L.y)) < 2.5) return;
+            path.push({ x: x, y: y });
+        }
+        var f0 = shapes[0];
+        addPt(f0.cx + (CFG.humanLike ? gaussian(0, 4) : 0), f0.cy + (CFG.humanLike ? gaussian(0, 4) : 0), false);
+        var wn = CFG.humanLike ? randInt(2, 4) : 2;
+        for (var w = 0; w < wn; w++) {
+            var a = Math.random() * Math.PI * 2, r = randRange(3, 8);
+            addPt(f0.cx + Math.cos(a) * r, f0.cy + Math.sin(a) * r, true);
+        }
+        for (var j = 1; j < shapes.length; j++) {
+            var A = shapes[j - 1], B = shapes[j];
+            var os = CFG.humanLike ? randRange(0, 6) : 0;
+            var mx = (A.cx + B.cx) / 2, my = (A.cy + B.cy) / 2;
+            var px = -(B.cy - A.cy), py = (B.cx - A.cx);
+            var ln = Math.sqrt(px * px + py * py) || 1;
+            px /= ln; py /= ln;
+            var ca = CFG.humanLike ? randRange(-15, 15) : 0;
+            var cpx = mx + px * ca, cpy = my + py * ca;
+            var c1x = A.cx + (cpx - A.cx) * 0.5, c1y = A.cy + (cpy - A.cy) * 0.5;
+            var c2x = B.cx + (cpx - B.cx) * 0.5, c2y = B.cy + (cpy - B.cy) * 0.5;
+            var dist = Math.sqrt((B.cx - A.cx) * (B.cx - A.cx) + (B.cy - A.cy) * (B.cy - A.cy));
+            var st = Math.max(8, Math.floor(dist / 4));
+            for (var s = 1; s <= st; s++) {
+                var t = s / st, it = 1 - t;
+                var pxx = it * it * it * A.cx + 3 * it * it * t * c1x + 3 * it * t * t * c2x + t * t * t * B.cx;
+                var pyy = it * it * it * A.cy + 3 * it * it * t * c1y + 3 * it * t * t * c2y + t * t * t * B.cy;
+                if (t > 0.85 && os > 0) {
+                    var dx = B.cx - A.cx, dy = B.cy - A.cy;
+                    var dl = Math.sqrt(dx * dx + dy * dy) || 1;
+                    var ov = os * (t - 0.85) / 0.15;
+                    pxx += (dx / dl) * ov; pyy += (dy / dl) * ov;
+                }
+                var ja = CFG.humanLike ? (1.8 * (1 - t * 0.5)) : 0;
+                if (ja > 0) { pxx += gaussian(0, ja); pyy += gaussian(0, ja); }
+                addPt(pxx, pyy, false);
+            }
+            var sn = CFG.humanLike ? randInt(2, 3) : 1;
+            for (var sw = 0; sw < sn; sw++) {
+                var sa = Math.random() * Math.PI * 2, sr = randRange(2, 6);
+                addPt(B.cx + Math.cos(sa) * sr, B.cy + Math.sin(sa) * sr, true);
+            }
+            addPt(B.cx, B.cy, false);
+        }
+        return path;
+    }
+
+    function drawPreview(ctx, path, kept) {
+        try {
+            var c2 = document.createElement('canvas');
+            c2.id = 'of-preview-canvas';
+            c2.width = CW; c2.height = CH;
+            var cc = c2.getContext('2d');
+            cc.drawImage(ctx.canvas, 0, 0);
+            cc.strokeStyle = '#ffff00'; cc.lineWidth = 3;
+            cc.lineCap = 'round'; cc.lineJoin = 'round';
+            cc.beginPath();
+            for (var pp = 0; pp < path.length; pp++) {
+                if (pp === 0) cc.moveTo(path[pp].x, path[pp].y);
+                else cc.lineTo(path[pp].x, path[pp].y);
+            }
+            cc.stroke();
+            cc.strokeStyle = '#ff00ff'; cc.lineWidth = 2;
+            cc.font = 'bold 13px monospace';
+            for (var m = 0; m < kept.length; m++) {
+                var q = kept[m];
+                cc.strokeRect(q.minX, q.minY, q.maxX - q.minX, q.maxY - q.minY);
+                cc.fillStyle = '#000'; cc.fillRect(q.minX, q.minY - 16, 100, 16);
+                cc.fillStyle = '#ffff00';
+                cc.fillText('#' + (m + 1) + ' px=' + q.n, q.minX + 2, q.minY - 4);
+            }
+            if (path.length > 0) {
+                cc.fillStyle = '#00ff00';
+                cc.beginPath(); cc.arc(path[0].x, path[0].y, 5, 0, Math.PI * 2); cc.fill();
+                cc.fillStyle = '#ff0000';
+                cc.beginPath(); cc.arc(path[path.length - 1].x, path[path.length - 1].y, 5, 0, Math.PI * 2); cc.fill();
+            }
+            c2.style.cssText = 'position:fixed;bottom:8px;right:8px;width:200px;z-index:2147483646;border:2px solid #0f0;background:#000';
+            if (document.body) document.body.appendChild(c2);
+        } catch (e) {}
+    }
+
+    function waitFaucetSubmit() {
+        if (!CFG.autoSubmit) return;
+        var start = Date.now();
+        var iv = setInterval(function () {
+            if (Date.now() - start > 45000) { clearInterval(iv); return; }
+            var mcch = document.querySelector('[id^="mcch_"]');
+            if (!mcch) return;
+            if (getComputedStyle(mcch).display === 'none') return;
+            clearInterval(iv);
+            var pre = CFG.humanLike ? randInt(1200, 2800) : 800;
+            setTimeout(function () {
+                var ael = document.querySelector('input[name="captcha_answer"]');
+                if (!ael || !solvedAnswer) return;
+                ael.value = solvedAnswer;
+                try { ael.dispatchEvent(new Event('input', { bubbles: true })); } catch (e) {}
+                try { ael.dispatchEvent(new Event('change', { bubbles: true })); } catch (e) {}
+                var post = CFG.humanLike ? randInt(CFG.submitDelayMin, CFG.submitDelayMax) : 1500;
+                setTimeout(function () {
+                    if (typeof window.__faucetSubmit === 'function') window.__faucetSubmit();
+                    else { var f = document.getElementById('fauform'); if (f) f.submit(); }
+                }, post);
+            }, pre);
+        }, 500);
+    }
+
+    function startFaucetAutoClick() {
+        if (!CFG.autoOpenGate) return;
+        setInterval(function () {
+            var sb = document.getElementById('subbutt');
+            if (sb && !sb.disabled && !sb.dataset.ofClicked) {
+                sb.dataset.ofClicked = '1';
+                var d = CFG.humanLike ? randInt(CFG.clickDelayMin, CFG.clickDelayMax) : 800;
+                setTimeout(function () {
+                    try { sb.click(); } catch (e) {}
+                    setTimeout(function () {
+                        var b2 = document.getElementById('subbutt');
+                        if (b2 && !b2.disabled) {
+                            if (typeof window.__faucetSubmit === 'function') window.__faucetSubmit();
+                            else { var f = document.getElementById('fauform'); if (f) f.submit(); }
+                        }
+                    }, 1500);
+                }, d);
+                return;
+            }
+            var mb = document.querySelector('[id^="mcbox_"]');
+            if (!mb || mb.dataset.ofClicked) return;
+            var ts = document.getElementById('ts-container');
+            var solved = ts && ts.className.indexOf('ts-gone') !== -1;
+            var gate = document.getElementById('mc-gate');
+            var gv = gate && getComputedStyle(gate).display !== 'none';
+            if (solved && gv) {
+                mb.dataset.ofClicked = '1';
+                var gd = CFG.humanLike ? randInt(500, 1500) : 400;
+                setTimeout(function () { try { mb.click(); } catch (e) {} }, gd);
+            }
+        }, 700);
+    }
+
+    function turnstileWatchdog() {
+        var le = Date.now();
+        setInterval(function () {
+            var b = document.getElementById('subbutt');
+            if (!b) return;
+            if (!b.disabled) { le = Date.now(); return; }
+            if (Date.now() - le > 90000) location.reload();
+        }, 5000);
+    }
+
+    function watchFaucetSuccess() {
+        if (!CFG.autoReturn) return;
+        if (location.pathname.indexOf('/faucet/verify/') !== 0) return;
+        var start = Date.now();
+        var iv = setInterval(function () {
+            if (Date.now() - start > 60000) { clearInterval(iv); return; }
+            var txt = (document.body && document.body.innerText) || '';
+            var ok = /congratulation|successfully claimed|claim successful|you (have )?(received|got)|claimed successfully/i.test(txt);
+            var bad = /error|invalid|failed|banned|blocked|wrong/i.test(txt);
+            if (ok && !bad) {
+                clearInterval(iv);
+                var coin = 'usdt';
+                var m = location.pathname.match(/\/faucet\/verify\/([a-z]+)/i);
+                if (m) coin = m[1];
+                var rd = CFG.humanLike ? randInt(2500, 5000) : CFG.returnDelayMs;
+                setTimeout(function () {
+                    location.href = location.origin + '/faucet/currency/' + coin;
+                }, rd);
+            }
+        }, 1500);
+    }
+
+    // ==================== SHORTLINKS WITH UI ====================
+    var linksRunning = false;
+    var linksStop = false;
+    var UI_PANEL_ID = 'of-panel';
+
+    window._ofLinksDone = window._ofLinksDone || {};
+    function getDone() { return window._ofLinksDone; }
+    function markDone(id) { window._ofLinksDone[id] = Date.now(); }
+
+    function getSelected() {
+        try { return JSON.parse(localStorage.getItem('of_links_selected') || '{}'); }
+        catch (e) { return {}; }
+    }
+    function saveSelected(sel) {
+        localStorage.setItem('of_links_selected', JSON.stringify(sel));
+    }
+
+    function buildPanel() {
+        if (document.getElementById(UI_PANEL_ID)) return;
+        var panel = document.createElement('div');
+        panel.id = UI_PANEL_ID;
+        panel.style.cssText = 'position:fixed;bottom:10px;left:10px;right:10px;z-index:2147483646;background:#000;color:#0f0;font:12px monospace;padding:10px;border:2px solid #0f0;border-radius:8px;box-shadow:0 4px 12px rgba(0,0,0,0.5)';
+        panel.innerHTML = ''
+            + '<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:8px">'
+            +   '<span style="color:#0af;font-weight:bold">🎯 OF Shortlinks Control</span>'
+            +   '<span id="of-close-panel" style="cursor:pointer;color:#f66;font-weight:bold;padding:0 6px">✕</span>'
+            + '</div>'
+            + '<div style="display:flex;gap:8px;margin-bottom:6px">'
+            +   '<button id="of-select-all" style="flex:1;background:#0a5;color:#fff;border:0;padding:10px;border-radius:6px;font-weight:bold;font-size:13px">☑️ Select All</button>'
+            +   '<button id="of-deselect" style="flex:1;background:#555;color:#fff;border:0;padding:10px;border-radius:6px;font-weight:bold;font-size:13px">☐ Deselect</button>'
+            + '</div>'
+            + '<div style="display:flex;gap:8px">'
+            +   '<button id="of-start" style="flex:2;background:#0af;color:#fff;border:0;padding:12px;border-radius:6px;font-weight:bold;font-size:14px">▶️ START SELECTED</button>'
+            +   '<button id="of-stop" style="flex:1;background:#c00;color:#fff;border:0;padding:12px;border-radius:6px;font-weight:bold;font-size:14px">🛑 STOP</button>'
+            + '</div>'
+            + '<div id="of-status" style="margin-top:8px;color:#ffb300;font-size:11px;text-align:center">Ready</div>';
+        document.body.appendChild(panel);
+
+        document.getElementById('of-close-panel').onclick = function () {
+            panel.style.display = 'none';
+        };
+        document.getElementById('of-select-all').onclick = function () {
+            document.querySelectorAll('.of-checkbox').forEach(function (cb) {
+                if (cb.disabled) return;
+                var id = cb.getAttribute('data-link-id');
+                cb.checked = true;
+                var sel = getSelected();
+                sel[id] = 1;
+                saveSelected(sel);
+            });
+            setStatus('Selected: ' + Object.keys(getSelected()).length + ' link(s)', '#0af');
+        };
+        document.getElementById('of-deselect').onclick = function () {
+            document.querySelectorAll('.of-checkbox').forEach(function (cb) { cb.checked = false; });
+            saveSelected({});
+            setStatus('Deselected all', '#888');
+        };
+        document.getElementById('of-start').onclick = function () {
+            startLinksProcess();
+        };
+        document.getElementById('of-stop').onclick = function () {
+            linksStop = true;
+            linksRunning = false;
+            setStatus('🛑 Stopped by user', '#f66');
+        };
+    }
+
+    function setStatus(msg, color) {
+        var el = document.getElementById('of-status');
+        if (el) { el.textContent = msg; el.style.color = color || '#ffb300'; }
+    }
+
+    function injectCheckboxes() {
+        var btns = document.querySelectorAll('.claim-btn');
+        if (!btns.length) return;
+
+        btns.forEach(function (btn) {
+            var id = btn.getAttribute('data-link-id');
+            if (!id) return;
+
+            var card = btn.closest('.card-body') || btn.closest('.card') || btn.parentElement;
+            if (!card) return;
+            if (card.querySelector('.of-checkbox')) return;
+
+            var badge = btn.querySelector('.badge');
+            var remaining = 1;
+            if (badge) {
+                var txt = (badge.textContent || '').trim();
+                var parts = txt.split('/');
+                if (parts.length === 2) remaining = parseInt(parts[0], 10);
+            }
+            var exhausted = (remaining === 0);
+
+            var wrap = document.createElement('div');
+            wrap.style.cssText = 'margin-top:10px;display:flex;align-items:center;justify-content:center;gap:8px;font-size:13px;color:#0af;font-weight:bold';
+            var cb = document.createElement('input');
+            cb.type = 'checkbox';
+            cb.className = 'of-checkbox';
+            cb.setAttribute('data-link-id', id);
+            cb.style.cssText = 'width:22px;height:22px;cursor:pointer;accent-color:#0af';
+
+            var lbl = document.createElement('label');
+            lbl.style.cssText = 'cursor:pointer;user-select:none';
+
+            if (exhausted) {
+                lbl.textContent = '✗ Limit reached (0 remaining)';
+                lbl.style.color = '#888';
+                cb.disabled = true;
+            } else {
+                lbl.textContent = 'Auto-claim (' + remaining + ' remaining)';
+                cb.checked = !!getSelected()[id];
+            }
+
+            cb.addEventListener('change', function () {
+                var sel = getSelected();
+                if (cb.checked) sel[id] = 1;
+                else delete sel[id];
+                saveSelected(sel);
+                setStatus('Selected: ' + Object.keys(sel).length + ' link(s)', '#0af');
+            });
+
+            wrap.appendChild(cb);
+            wrap.appendChild(lbl);
+            card.appendChild(wrap);
+        });
+    }
+
+    function handleVerifyModal() {
+        if (!CFG.autoVerifyModal) return;
+        var modal = document.getElementById('claimModal');
+        if (!modal) return;
+        if (!modal.classList.contains('show')) return;
+        var btn = document.getElementById('claimBtn');
+        if (!btn || btn.disabled || btn.dataset.ofClicked) return;
+        btn.dataset.ofClicked = '1';
+        var delay = CFG.humanLike ? randInt(1200, 2800) : 800;
+        setTimeout(function () {
+            try { btn.click(); } catch (e) {}
+        }, delay);
+    }
+
+    function findNextSelectedBtn() {
+        var sel = getSelected();
+        var done = getDone();
+        var btns = document.querySelectorAll('.claim-btn');
+        for (var i = 0; i < btns.length; i++) {
+            var b = btns[i];
+            var id = b.getAttribute('data-link-id');
+            if (!sel[id]) continue;
+            if (done[id]) continue;
+            if (b.dataset.ofClicked) continue;
+            if (b.disabled || b.classList.contains('loading')) continue;
+            var badge = b.querySelector('.badge');
+            if (badge) {
+                var txt = (badge.textContent || '').trim();
+                var parts = txt.split('/');
+                if (parts.length === 2 && parts[0] === '0') continue;
+            }
+            return b;
+        }
+        return null;
+    }
+
+    function startLinksProcess() {
+        if (linksRunning) { setStatus('⚠️ Already running', '#ffb300'); return; }
+        var sel = getSelected();
+        var count = Object.keys(sel).length;
+        if (count === 0) { setStatus('⚠️ No links selected', '#f66'); return; }
+        linksRunning = true;
+        linksStop = false;
+        setStatus('🚀 Starting... ' + count + ' link(s)', '#0af');
+        dbg('[links] started, ' + count + ' selected');
+        processNext();
+    }
+
+    function processNext() {
+        if (linksStop) {
+            linksRunning = false;
+            setStatus('🛑 Stopped', '#f66');
+            return;
+        }
+        var btn = findNextSelectedBtn();
+        if (!btn) {
+            linksRunning = false;
+            setStatus('✅ All selected links done!', '#0a5');
+            dbg('[links] all done');
+            return;
+        }
+        var id = btn.getAttribute('data-link-id');
+        var delay = CFG.humanLike ? randInt(1500, 3500) : 800;
+        setStatus('⏳ Processing id=' + id + ' in ' + Math.round(delay/1000) + 's', '#ffb300');
+        setTimeout(function () {
+            if (linksStop) { linksRunning = false; setStatus('🛑 Stopped', '#f66'); return; }
+            try {
+                btn.dataset.ofClicked = '1';
+                btn.click();
+                markDone(id);
+                dbg('[links] clicked ' + id);
+                setStatus('✅ Clicked id=' + id + ' — waiting ' + Math.round(CFG.betweenMs/1000) + 's', '#0a5');
+            } catch (e) { dbg('[links] err ' + e.message); }
+            setTimeout(function () {
+                if (linksStop) { linksRunning = false; return; }
+                processNext();
+            }, CFG.betweenMs);
+        }, delay);
+    }
+
+    function startShortlinks() {
+        buildPanel();
+        injectCheckboxes();
+        setInterval(function () {
+            injectCheckboxes();
+            handleVerifyModal();
+        }, 1500);
+        setStatus('✅ Ready — select links and press START', '#0a5');
+    }
+
+    // ==================== BOOT ====================
+    function boot() {
+        killOverlays();
+        var path = location.pathname;
+
+        if (CFG.autoLogin) {
+            setInterval(tryAutoLogin, 1500);
+            setTimeout(function () { loginDone = true; }, 60000);
+        }
+
+        if (path.indexOf('/faucet/') === 0) {
+            dbg('[boot] faucet');
+            startFaucet();
+            startClaimNowWatcher();   // <-- AUTO CLAIM NOW
+        } else if (path.indexOf('/links/') === 0) {
+            dbg('[boot] shortlinks');
+            startShortlinks();
+        } else {
+            dbg('[boot] idle');
+            // Kalau halaman lain (mis. /home) juga ada tombol Claim Now, tetap watch
+            startClaimNowWatcher();
+        }
+    }
+
+    if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
+    else boot();
+})();
